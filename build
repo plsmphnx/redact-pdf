@@ -1,0 +1,2 @@
+#!/bin/sh
+g++ redact-pdf.cc -lqpdf -o redact-pdf
