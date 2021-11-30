@@ -38,7 +38,7 @@ struct args_t {
 
 // Print usage and exit
 void usage(args_t &args) {
-    std::cerr << "Usage: " << args.whoami << " [-psqtom] regex infile [outfile]"
+    std::cerr << "Usage: " << args.whoami << " [-motqsp] regex infile [outfile]"
               << std::endl;
     exit(2);
 }
