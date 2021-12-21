@@ -34,5 +34,3 @@ redactions:
   formatting) can't be redacted.
 - Stream redaction is not currently well-defined on XObject streams, only page
   content streams.
-- Page content streams will always be coalesced into a single stream (see
-  https://github.com/qpdf/qpdf/issues/580).

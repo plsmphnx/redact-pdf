@@ -93,7 +93,6 @@ class Filter : public QPDFObjectHandle::TokenFilter {
   private:
     std::regex _regex;
     scope_t _scope;
-    bool *_redact;
 
     // Each buffer in the stack contains the unwritten data (which is being
     // stored in case it needs to be redacted in the future), and a flag
@@ -159,8 +158,10 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     }
 
   public:
-    Filter(const char *const regex, scope_t scope, bool *redact)
-        : _regex(regex), _scope(scope), _redact(redact) {}
+    bool redact = false;
+
+    Filter(const char *const regex, scope_t scope)
+        : _regex(regex), _scope(scope) {}
 
     void handleToken(QPDFTokenizer::Token const &token) {
         auto &value = token.getValue();
@@ -196,7 +197,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
                     if (_stack.size() > 0) {
                         _stack.back().redact = true;
                     } else {
-                        *_redact = true;
+                        redact = true;
                     }
                 }
             }
@@ -251,31 +252,25 @@ bool redactPage(args_t &args, QPDFPageObjectHelper &page) {
     // Loop through each page contents, testing for matches
     std::vector<QPDFObjectHandle> contents;
     for (auto &obj : getContents(object)) {
-        auto redact = false;
-        Filter f(args.regex, args.scope, &redact);
-        obj.filterAsContents(&f);
-        if (redact) {
-            if (args.scope >= s_page) {
-                // For page-scoped redactions, simply bail here
-                return true;
-            } else if (args.scope < s_stream) {
-                // Redactions within a stream are handled in-place, so retain
-                // the stream itself
-                contents.push_back(obj);
+        if (args.scope >= s_stream) {
+            Filter f(args.regex, args.scope);
+            obj.filterAsContents(&f);
+            if (f.redact) {
+                switch (args.scope) {
+                case s_page:
+                    // For page-scoped redactions, simply bail here
+                    return true;
+                case s_stream:
+                    // For stream-scoped redactions, omit the stream
+                    continue;
+                }
             }
-            // For stream-scoped redactions, omit the stream
         } else {
-            contents.push_back(obj);
+            obj.addTokenFilter(new Filter(args.regex, args.scope));
         }
+        contents.push_back(obj);
     }
     setContents(object, contents);
-
-    // TODO: Collapse this into the above loop via addTokenFilter once it is
-    // exposed correctly; see https://github.com/qpdf/qpdf/issues/580
-    {
-        auto redact = false;
-        page.addContentTokenFilter(new Filter(args.regex, args.scope, &redact));
-    }
 
     // Iterate through nested form XObjects
     for (auto &entry : page.getFormXObjects()) {
