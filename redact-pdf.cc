@@ -83,24 +83,19 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     // indicating whether its contents have been identified as needing redaction
     struct buffer {
         bool redact;
-        std::vector<std::string> data;
+        std::vector<QPDFTokenizer::Token> data;
     };
     std::vector<buffer> _stack;
     bool _trim = false;
 
-    // Add the given raw string to the currently active buffer, or to the stream
-    // itself if not currently buffering
-    void _add(const std::string &raw) {
-        if (_stack.size() > 0) {
-            _stack.back().data.push_back(raw);
-        } else {
-            write(raw);
-        }
-    }
-
-    // Add a token, as above
+    // Add a token to the currently active buffer, or to the stream itself
+    // if not currently buffering
     void _add(const QPDFTokenizer::Token &token) {
-        _add(token.getRawValue());
+        if (_stack.size() > 0) {
+            _stack.back().data.push_back(token);
+        } else {
+            writeToken(token);
+        }
         _trim = false;
     }
 
@@ -169,8 +164,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
                 // For match-scoped redactions, simply replace any matches with
                 // an empty string and replace the string token with the result
                 auto redacted = regex_replace(value, _regex, "");
-                _add(QPDFTokenizer::Token(QPDFTokenizer::tt_string, redacted)
-                         .getRawValue());
+                _add(QPDFTokenizer::Token(QPDFTokenizer::tt_string, redacted));
             } else {
                 // For higher-scoped redactions, add the string token unchanged
                 // but flag the current buffer as needing redaction if there is
