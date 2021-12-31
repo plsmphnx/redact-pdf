@@ -25,6 +25,9 @@ enum scope_t {
     s_page
 };
 
+// Argument flags used to set scope; index matches enum
+const std::string SCOPE_FLAGS = "motqsp";
+
 // Shorthand for which scopes contain start/end operators, and so can be nested
 inline bool nestable(scope_t scope) {
     return scope == s_text_object || scope == s_graphics_state;
@@ -38,8 +41,8 @@ struct args_t {
 
 // Print usage and exit
 void usage(args_t &args) {
-    std::cerr << "Usage: " << args.whoami << " [-motqsp] regex infile [outfile]"
-              << std::endl;
+    std::cerr << "Usage: " << args.whoami << " [-" << SCOPE_FLAGS << "] "
+              << "regex infile [outfile]" << std::endl;
     exit(2);
 }
 
@@ -48,28 +51,9 @@ void parseArgs(int argc, char *argv[], args_t &args) {
     args.whoami = QUtil::getWhoami(argv[0]);
     for (auto i = 1; i < argc; i++) {
         if (argv[i][0] == '-') {
-            switch (argv[i][1]) {
-            case 'p':
-                args.scope = s_page;
-                break;
-            case 's':
-                args.scope = s_stream;
-                break;
-            case 'q':
-                args.scope = s_graphics_state;
-                break;
-            case 't':
-                args.scope = s_text_object;
-                break;
-            case 'o':
-                args.scope = s_operator;
-                break;
-            case 'm':
-                args.scope = s_match;
-                break;
-            default:
+            args.scope = (scope_t)(SCOPE_FLAGS.find(argv[i][1]));
+            if (args.scope == std::string::npos) {
                 usage(args);
-                break;
             }
         } else if (!args.regex) {
             args.regex = argv[i];
@@ -115,7 +99,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     }
 
     // Add a token, as above
-    void _add(QPDFTokenizer::Token const &token) {
+    void _add(const QPDFTokenizer::Token &token) {
         _add(token.getRawValue());
         _trim = false;
     }
@@ -140,7 +124,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
 
     // Start a new buffer if the desired scope matches the expected scope,
     // and add the given token at the beginning
-    template <scope_t scope> void _start(QPDFTokenizer::Token const &token) {
+    void _start(scope_t scope, const QPDFTokenizer::Token &token) {
         // Start a new buffer only if there is none or the scope is nestable
         if (_scope == scope && (nestable(scope) || _stack.size() == 0)) {
             _stack.push_back(buffer{false});
@@ -150,7 +134,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
 
     // Add the given token and flush the current buffer if the desired scope
     // matches the expected scope
-    template <scope_t scope> void _end(QPDFTokenizer::Token const &token) {
+    void _end(scope_t scope, const QPDFTokenizer::Token &token) {
         _add(token);
         if (_scope == scope && _stack.size() > 0) {
             _flush();
@@ -160,25 +144,24 @@ class Filter : public QPDFObjectHandle::TokenFilter {
   public:
     bool redact = false;
 
-    Filter(const char *const regex, scope_t scope)
-        : _regex(regex), _scope(scope) {}
+    Filter(const char *regex, scope_t scope) : _regex(regex), _scope(scope) {}
 
-    void handleToken(QPDFTokenizer::Token const &token) {
+    void handleToken(const QPDFTokenizer::Token &token) {
         auto &value = token.getValue();
         switch (token.getType()) {
         case QPDFTokenizer::tt_word:
             // Mark appropriate start/end operators (which have no arguments) or
             // the end of an operator block (which may have arguments)
             if (value == "BT") {
-                _start<s_text_object>(token);
+                _start(s_text_object, token);
             } else if (value == "ET") {
-                _end<s_text_object>(token);
+                _end(s_text_object, token);
             } else if (value == "q") {
-                _start<s_graphics_state>(token);
+                _start(s_graphics_state, token);
             } else if (value == "Q") {
-                _end<s_graphics_state>(token);
+                _end(s_graphics_state, token);
             } else {
-                _end<s_operator>(token);
+                _end(s_operator, token);
             }
             break;
         case QPDFTokenizer::tt_string:
@@ -192,7 +175,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
                 // For higher-scoped redactions, add the string token unchanged
                 // but flag the current buffer as needing redaction if there is
                 // a match
-                _start<s_operator>(token);
+                _start(s_operator, token);
                 if (regex_search(value, _regex)) {
                     if (_stack.size() > 0) {
                         _stack.back().redact = true;
@@ -214,7 +197,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
             // Any other token may be an argument that needs to be trimmed as
             // part of redacting an operator; since operators can't be nested,
             // marking this repeatedly is safe
-            _start<s_operator>(token);
+            _start(s_operator, token);
             break;
         }
     }
@@ -239,7 +222,7 @@ std::vector<QPDFObjectHandle> getContents(QPDFObjectHandle &obj) {
 // Set the contents of a page (no-op for a form XObject)
 void setContents(QPDFObjectHandle &obj, std::vector<QPDFObjectHandle> &c) {
     if (obj.isPageObject()) {
-        auto contents = c.size() == 1 ? c.at(0) : QPDFObjectHandle::newArray(c);
+        auto contents = c.size() == 1 ? c[0] : QPDFObjectHandle::newArray(c);
         obj.replaceKey("/Contents", contents);
     }
     // TODO: Figure out what stream-level filters for form XObjects should mean
@@ -305,11 +288,11 @@ int main(int argc, char *argv[]) {
 
         // If no outfile was provided (indicating an in-place edit), generate
         // a temporary file based on the infile
-        std::string outfile =
+        auto outfile =
             args.outfile ? args.outfile : std::string(args.infile) + "~";
 
-        QPDFWriter w(pdf, outfile.c_str());
-        w.write();
+        QPDFWriter writer(pdf, outfile.c_str());
+        writer.write();
 
         if (!args.outfile) {
             // Replace the infile with the temporary file
