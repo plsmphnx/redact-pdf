@@ -79,50 +79,49 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     scope_t _scope;
 
     // Each buffer in the stack contains the unwritten data (which is being
-    // stored in case it needs to be redacted in the future), and a flag
-    // indicating whether its contents have been identified as needing redaction
+    // stored in case it needs to be redacted in the future), and the collected
+    // text to test for redaction
     struct buffer {
-        bool redact;
+        std::string text;
         std::vector<QPDFTokenizer::Token> data;
     };
     std::vector<buffer> _stack;
     bool _trim = false;
 
-    // Add a token to the currently active buffer, or to the stream itself
-    // if not currently buffering
+    // Add a token to the currently active buffer
     void _add(const QPDFTokenizer::Token &token) {
-        if (_stack.size() > 0) {
-            _stack.back().data.push_back(token);
-        } else {
-            writeToken(token);
+        auto &target = _stack.back();
+        target.data.push_back(token);
+        if (token.getType() == QPDFTokenizer::tt_string) {
+            target.text += token.getValue();
         }
         _trim = false;
     }
 
     // Flush the currently active buffer to the next lower frame
     void _flush() {
-        auto buf = _stack.back();
+        auto target = _stack.back();
         _stack.pop_back();
 
         // The buffer is removed either way, but the data is only added if
         // it is not being redacted
-        if (!buf.redact) {
-            for (auto token : buf.data) {
+        if (!regex_search(target.text, _regex)) {
+            for (auto token : target.data) {
                 _add(token);
             }
+        } else {
+            // Since the filter is operating on a stream, flag the immediate
+            // next whitespace as also requiring redaction
+            _trim = true;
         }
-
-        // Since the filter is operating on a stream, flag the immediate next
-        // whitespace as also requiring redaction
-        _trim = buf.redact;
     }
 
     // Start a new buffer if the desired scope matches the expected scope,
     // and add the given token at the beginning
     void _start(scope_t scope, const QPDFTokenizer::Token &token) {
         // Start a new buffer only if there is none or the scope is nestable
-        if (_scope == scope && (nestable(scope) || _stack.size() == 0)) {
-            _stack.push_back(buffer{false});
+        if (_scope == scope && (nestable(scope) || _stack.size() == 1)) {
+            _stack.push_back(buffer{});
         }
         _add(token);
     }
@@ -131,7 +130,7 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     // matches the expected scope
     void _end(scope_t scope, const QPDFTokenizer::Token &token) {
         _add(token);
-        if (_scope == scope && _stack.size() > 0) {
+        if (_scope == scope && _stack.size() > 1) {
             _flush();
         }
     }
@@ -139,7 +138,9 @@ class Filter : public QPDFObjectHandle::TokenFilter {
   public:
     bool redact = false;
 
-    Filter(const char *regex, scope_t scope) : _regex(regex), _scope(scope) {}
+    Filter(const char *regex, scope_t scope) : _regex(regex), _scope(scope) {
+        _stack.push_back(buffer{});
+    }
 
     void handleToken(const QPDFTokenizer::Token &token) {
         auto &value = token.getValue();
@@ -159,26 +160,6 @@ class Filter : public QPDFObjectHandle::TokenFilter {
                 _end(s_operator, token);
             }
             break;
-        case QPDFTokenizer::tt_string:
-            if (_scope == s_match) {
-                // For match-scoped redactions, simply replace any matches with
-                // an empty string and replace the string token with the result
-                auto redacted = regex_replace(value, _regex, "");
-                _add(QPDFTokenizer::Token(QPDFTokenizer::tt_string, redacted));
-            } else {
-                // For higher-scoped redactions, add the string token unchanged
-                // but flag the current buffer as needing redaction if there is
-                // a match
-                _start(s_operator, token);
-                if (regex_search(value, _regex)) {
-                    if (_stack.size() > 0) {
-                        _stack.back().redact = true;
-                    } else {
-                        redact = true;
-                    }
-                }
-            }
-            break;
         case QPDFTokenizer::tt_space:
             // Add the space token if it should not be trimmed immediately
             // following a redaction, then unmark the trimming state
@@ -187,6 +168,14 @@ class Filter : public QPDFObjectHandle::TokenFilter {
             }
             _trim = false;
             break;
+        case QPDFTokenizer::tt_string:
+            if (_scope == s_match) {
+                // For match-scoped redactions, simply replace any matches with
+                // an empty string and replace the string token with the result
+                auto redacted = regex_replace(value, _regex, "");
+                _add(QPDFTokenizer::Token(QPDFTokenizer::tt_string, redacted));
+                break;
+            }
         default:
             // Any other token may be an argument that needs to be trimmed as
             // part of redacting an operator; since operators can't be nested,
@@ -197,10 +186,24 @@ class Filter : public QPDFObjectHandle::TokenFilter {
     }
 
     void handleEOF() {
-        // At the end of the stream, flush any remaining open buffers
-        while (_stack.size() > 0) {
+        // Flush any remaining open buffers
+        while (_stack.size() > 1) {
             _flush();
         }
+
+        auto target = _stack.back();
+        _stack.pop_back();
+
+        // Write the final data
+        for (auto token : target.data) {
+            writeToken(token);
+        }
+
+        // Mark for higher-level redaction if necessary
+        redact = regex_search(target.text, _regex);
+
+        // Prepare for future executions of the filter
+        _stack.push_back(buffer{});
     }
 };
 
@@ -251,7 +254,7 @@ bool redactPage(args_t &args, QPDFPageObjectHelper &page) {
 
     // Iterate through nested form XObjects
     for (auto &entry : page.getFormXObjects()) {
-        auto form = QPDFPageObjectHelper(entry.second);
+        QPDFPageObjectHelper form(entry.second);
         if (redactPage(args, form)) {
             return true;
         }
@@ -269,7 +272,7 @@ int main(int argc, char *argv[]) {
         pdf.processFile(args.infile);
 
         // Loop through each page, redacting as necessary
-        auto doc = QPDFPageDocumentHelper(pdf);
+        QPDFPageDocumentHelper doc(pdf);
         for (auto &page : doc.getAllPages()) {
             if (redactPage(args, page)) {
                 doc.removePage(page);

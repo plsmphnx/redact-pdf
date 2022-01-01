@@ -29,8 +29,11 @@ redactions:
 
 ## Known Limitations
 
-- Text is currently only matched within a single token; this means that text
-  that crosses lines or pages (or possibly within a single line depending on
-  formatting) can't be redacted.
+- Text is only matched within its scope; this means that text that crosses the
+  boundary of its scope can't be redacted.
+- Text across tokens is simply concatenated for purposes of testing for
+  redaction; this means that text crossing tokens (e.g. across lines, assuming
+  the lines are stored as separate operators) will not have any intervening
+  whitespace in the tested string, despite having such visually.
 - Stream redaction is not currently well-defined on XObject streams, only page
   content streams.
